@@ -3,6 +3,10 @@
 # AIC8800D80 Bluetooth Diagnostic Script
 # 用于诊断蓝牙问题
 #
+# 本分支 (bluetooth) 使用内核标准 btusb 驱动接管蓝牙，
+# aic_load_fw 负责把蓝牙固件上传到芯片。
+# 不应该再安装/加载 aic_btusb。
+#
 
 echo "=== AIC8800D80 蓝牙诊断 ==="
 echo ""
@@ -38,8 +42,8 @@ done
 echo ""
 
 # 3. 检查已加载的模块
-echo "3. 已加载的 AIC 模块:"
-lsmod | grep -E "aic|btusb" || echo "   未找到相关模块"
+echo "3. 已加载的相关模块 (期望: aic_load_fw + btusb):"
+lsmod | grep -E "aic_load_fw|aicwf|btusb|bluetooth" || echo "   未找到相关模块"
 echo ""
 
 # 4. 检查 HCI 设备
@@ -49,7 +53,7 @@ echo ""
 
 # 5. 检查蓝牙固件加载日志
 echo "5. 蓝牙固件加载日志 (最近 50 行):"
-dmesg | grep -iE "fw_patch|fw_adid|aicbt|bluetooth|btusb|aic_btusb|hci" | tail -50
+dmesg | grep -iE "fw_patch|fw_adid|aicbt|bluetooth|btusb|hci" | tail -50
 echo ""
 
 # 6. 检查 rfkill 状态
@@ -57,13 +61,15 @@ echo "6. RF-Kill 状态:"
 rfkill list bluetooth 2>/dev/null || echo "   无法获取 rfkill 信息"
 echo ""
 
-# 7. 检查 modprobe 配置
-echo "7. Modprobe 配置:"
+# 7. 检查残留的旧 modprobe 配置 (issue #53)
+echo "7. 残留旧配置检查:"
 if [ -f /etc/modprobe.d/aic8800-bt.conf ]; then
-    echo "   /etc/modprobe.d/aic8800-bt.conf 存在:"
-    cat /etc/modprobe.d/aic8800-bt.conf
+    echo "   ⚠️  发现 /etc/modprobe.d/aic8800-bt.conf —— 这是早期版本残留, 应删除"
+    echo "   该文件 softdep / alias 到不再存在的 aic_btusb, 会导致 btusb 接管设备"
+    echo "   但固件未上传, 表现为 hci0 HCI_Reset 超时 (-110)"
+    echo "   修复: sudo rm /etc/modprobe.d/aic8800-bt.conf && sudo update-initramfs -u (若用 initramfs)"
 else
-    echo "   /etc/modprobe.d/aic8800-bt.conf 不存在!"
+    echo "   /etc/modprobe.d/aic8800-bt.conf 不存在 (正常)"
 fi
 echo ""
 
@@ -71,28 +77,29 @@ echo ""
 echo "=== 诊断建议 ==="
 echo ""
 
-# 检查是否有 3 个接口
-intf_count=$(lsusb -t 2>/dev/null | grep -c "Class=Wireless" || echo "0")
-if [ "$intf_count" -lt 2 ]; then
-    echo "⚠️  蓝牙接口数量不足 (应该有 2 个 Wireless 接口)"
-    echo "   可能原因: aic_load_fw 没有加载蓝牙固件"
-    echo "   解决方案: 检查 dmesg 中是否有 'fw_patch_table_8800d80' 相关日志"
+# 检查 aic_load_fw 是否加载 (它负责上传 WiFi + BT 固件)
+if ! lsmod | grep -q "^aic_load_fw"; then
+    echo "⚠️  aic_load_fw 未加载"
+    echo "   该模块负责把蓝牙固件上传到芯片, 必须先于 btusb 工作"
+    echo "   解决方案: sudo modprobe aic_load_fw"
     echo ""
 fi
 
-# 检查 btusb 是否抢占
+# 检查 HCI_Reset 超时 (典型症状: 固件未上传却让 btusb 接管)
+if dmesg | grep -iE "hci0:.*command (0x|tx) timed out|hci0.*opcode.*0x0c03" | tail -5 | grep -q .; then
+    echo "⚠️  检测到 HCI 命令超时 (HCI_Reset/-110)"
+    echo "   常见原因:"
+    echo "     a) /etc/modprobe.d/aic8800-bt.conf 残留 (见第 7 项)"
+    echo "     b) aic_load_fw 没有先把蓝牙固件 patch 上传到芯片"
+    echo "     c) usb_modeswitch 没把 1111:1111 切换到真实 VID:PID"
+    echo "   排查: 看上面第 5 项日志, 应能看到 fw_patch_table_8800d80 / fw_adid 字样"
+    echo "   临时缓解: 拔插一次设备 (软件复位/飞行模式切换通常无法救活)"
+    echo ""
+fi
+
+# btusb 是否已接管 BT 接口 (这是正常预期)
 if lsmod | grep -q "^btusb"; then
-    echo "⚠️  btusb 模块已加载"
-    echo "   如果蓝牙不工作，可能是 btusb 抢占了设备"
-    echo "   解决方案: sudo rmmod btusb && sudo modprobe aic_btusb"
-    echo ""
-fi
-
-# 检查 aic_btusb 是否加载
-if ! lsmod | grep -q "aic_btusb"; then
-    echo "⚠️  aic_btusb 模块未加载"
-    echo "   解决方案: sudo modprobe aic_btusb"
-    echo ""
+    echo "✅ btusb 已加载 (正常, 本分支由 btusb 接管蓝牙)"
 fi
 
 echo "=== 诊断完成 ==="
